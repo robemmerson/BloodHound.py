@@ -43,7 +43,7 @@ from future.utils import itervalues, iteritems, native_str
 Active Directory Domain Controller
 """
 class ADDC(ADComputer):
-    def __init__(self, hostname=None, ad=None):
+    def __init__(self, hostname=None, ad=None, override_ip=None):
         ADComputer.__init__(self, hostname)
         self.ad = ad
         # Primary LDAP connection
@@ -54,6 +54,8 @@ class ADDC(ADComputer):
         self.gcldap = None
         # Initialize GUID map
         self.objecttype_guid_map = dict()
+        # override which IP gets chosen
+        self.dc_ipaddress = override_ip
 
     def ldap_connect(self, protocol='ldap', resolver=False):
         """
@@ -64,8 +66,25 @@ class ADDC(ADComputer):
         # Convert the hostname to an IP, this prevents ldap3 from doing it
         # which doesn't use our custom nameservers
         q = self.ad.dnsresolver.query(self.hostname, tcp=self.ad.dns_tcp)
-        for r in q:
-            ip = r.address
+        if self.dc_ipaddress:
+
+            # checking if in results from dns resolution
+            in_results = False
+            results = []
+            for r in q:
+                results.append(r.address)
+                if r.address == self.dc_ipaddress:
+                    in_results = True
+            if not in_results:
+                logging.warning('Your Domain Controllers override IP address appears to not be resolved for the primary DC. results are:')
+                logging.warning(' '.join(results))
+
+            # still let user assign, since it was an override
+            ip = self.dc_ipaddress
+        else:
+            # normal logic without an overriding DC IP address
+            for r in q:
+                ip = r.address
 
         ldap = self.ad.auth.getLDAPConnection(hostname=ip,
                                               baseDN=self.ad.baseDN, protocol=protocol)
@@ -510,6 +529,7 @@ class AD(object):
         self.dnsresolver.cache = resolver.Cache()
         # Default timeout after 3 seconds if the DNS servers
         # do not come up with an answer
+        self.dnsresolver.timeout = float(dns_timeout)
         self.dnsresolver.lifetime = float(dns_timeout)
         # Also create a custom cache for both forward and backward lookups
         # this cache is thread-safe
@@ -606,36 +626,31 @@ class AD(object):
         except resolver.NXDOMAIN:
             pass
 
-        try:
-            q = self.dnsresolver.query(query.replace('pdc','gc'), 'SRV', tcp=self.dns_tcp)
-            for r in q:
-                gc = str(r.target).rstrip('.')
-                logging.debug('Found Global Catalog server: %s' % gc)
-                if gc not in self._gcs:
-                    self._gcs.append(gc)
+        if options and not options.disable_autogc:
+            try:
+                q = self.dnsresolver.query(query.replace('pdc','gc'), 'SRV', tcp=self.dns_tcp)
+                for r in q:
+                    gc = str(r.target).rstrip('.')
+                    logging.debug('Found Global Catalog server: %s' % gc)
+                    if gc not in self._gcs:
+                        self._gcs.append(gc)
 
-        except resolver.NXDOMAIN:
-            # Only show warning if we don't already have a GC specified manually
-            if options and not options.global_catalog:
-                if not options.disable_autogc:
-                    logging.warning('Could not find a global catalog server, assuming the primary DC has this role\n'
-                                    'If this gives errors, either specify a hostname with -gc or disable gc resolution with --disable-autogc')
-                    self._gcs = self._dcs
-                else:
-                    logging.warning('Could not find a global catalog server. Please specify one with -gc')
+            except resolver.NXDOMAIN:
+                # Only show warning if we don't already have a GC specified manually
+                if options and not options.global_catalog:
+                    if not options.disable_autogc:
+                        logging.warning('Could not find a global catalog server, assuming the primary DC has this role\n'
+                                        'If this gives errors, either specify a hostname with -gc or disable gc resolution with --disable-autogc')
+                        self._gcs = self._dcs
+                    else:
+                        logging.warning('Could not find a global catalog server. Please specify one with -gc')
 
         if kerberos is True:
-            try:
-                q = self.dnsresolver.query('_kerberos._tcp.dc._msdcs', 'SRV', tcp=self.dns_tcp)
-                for r in q:
-                    kdc = str(r.target).rstrip('.')
-                    logging.debug('Found KDC: %s' % str(r.target).rstrip('.'))
-                    if kdc not in self._kdcs:
-                        self._kdcs.append(kdc)
-                        self.auth.kdc = self._kdcs[0]
-            except resolver.NXDOMAIN:
-                pass
-
+            kdc = "dc02.denkiair.com"
+            logging.debug('Kinda-Found KDC: %s' % str(r.target).rstrip('.'))
+            if kdc not in self._kdcs:
+                self._kdcs.append(kdc)
+                self.auth.kdc = self._kdcs[0]
         return True
 
 
